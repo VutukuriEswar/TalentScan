@@ -1,60 +1,28 @@
-"""
-TalentScan — server.py
-======================
-Full-stack AI-powered resume screening backend.
-Single-file FastAPI application organized into logical sections.
-
-Sections:
-  1.  Imports & Config
-  2.  Database Setup (MongoDB + FAISS)
-  3.  Pydantic Models
-  4.  Parsing Layer (PDF / DOCX / Text)
-  5.  NER Extraction (spaCy + LLM fallback)
-  6.  Embedding Engine (sentence-transformers + FAISS)
-  7.  Semantic Skill Matching
-  8.  LLM Client (OpenRouter with graceful fallback)
-  9.  TF-IDF Fallback Scorer
-  10. Core Scoring Pipeline
-  11. Zero-Hallucination Safeguard
-  12. Resume Authenticity Checker
-  13. Duplicate Detection
-  14. JD Quality & Bias Analyzer
-  15. Candidate Feedback Generator
-  16. Interview Questions & Invite Generator
-  17. RAG Chat Assistant
-  18. Bias Redaction
-  19. Audit Logger
-  20. Analytics Aggregators
-  21. Export Utilities
-  22. API Route Handlers
-  23. Startup / Shutdown
-"""
-
-# =============================================================================
-# 1. IMPORTS & CONFIG
-# =============================================================================
-
 import os, re, io, json, uuid, math, hashlib, logging, asyncio
 from datetime import datetime, timezone
 from typing import Any, Optional
 from pathlib import Path
 from functools import lru_cache
-
+import csv
 import numpy as np
 import httpx
 from dotenv import load_dotenv
-
+from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import (
     FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks,
-    Query, Depends
+    Query, Depends, Header
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from pymongo import MongoClient, ASCENDING, DESCENDING
+from pymongo.errors import ConnectionFailure
+import faiss
+import pickle
 
 load_dotenv(Path(__file__).parent / ".env")
 
-# --- Config ---
 MONGO_URI        = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME          = os.getenv("DB_NAME", "talentscan_db")
 OPENROUTER_KEY   = os.getenv("OPENROUTER_API_KEY", "")
@@ -63,8 +31,6 @@ CORS_ORIGINS     = os.getenv("CORS_ORIGINS", "*").split(",")
 PORT             = int(os.getenv("PORT", 8000))
 JWT_SECRET       = os.getenv("JWT_SECRET", "change_me")
 UPLOAD_DIR       = Path(__file__).parent / "uploads"
-FAISS_INDEX_PATH = Path(__file__).parent / "faiss_index.bin"
-FAISS_META_PATH  = Path(__file__).parent / "faiss_index.pkl"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 EMBED_DIM        = 384
 DUPLICATE_THRESHOLD = 0.95
@@ -73,19 +39,10 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("talentscan")
 
-# =============================================================================
-# 2. DATABASE SETUP
-# =============================================================================
-
-from pymongo import MongoClient, ASCENDING, DESCENDING
-from pymongo.errors import ConnectionFailure
-import faiss
-import pickle
-
 _mongo_client: Optional[MongoClient] = None
 _db = None
 _faiss_index = None
-_faiss_meta: list[dict] = []   # [{id, type, ref_id}]  aligned with FAISS rows
+_faiss_meta: list[dict] = []
 _embed_model = None
 
 def get_db():
@@ -109,22 +66,35 @@ def _ensure_indexes():
 def get_faiss():
     global _faiss_index, _faiss_meta
     if _faiss_index is None:
-        if FAISS_INDEX_PATH.exists() and FAISS_META_PATH.exists():
-            _faiss_index = faiss.read_index(str(FAISS_INDEX_PATH))
-            with open(FAISS_META_PATH, "rb") as f:
-                _faiss_meta = pickle.load(f)
-            log.info(f"FAISS index loaded: {_faiss_index.ntotal} vectors.")
+        db = get_db()
+        record = db.faiss_store.find_one({"_id": "main_index"})
+        if record:
+            idx_bytes = record["index"]
+            meta_bytes = record["meta"]
+            idx_array = np.frombuffer(idx_bytes, dtype=np.uint8)
+            _faiss_index = faiss.deserialize_index(idx_array)
+            _faiss_meta = pickle.loads(meta_bytes)
+            log.info(f"FAISS index loaded from MongoDB: {_faiss_index.ntotal} vectors.")
         else:
-            _faiss_index = faiss.IndexFlatIP(EMBED_DIM)   # Inner-product (cosine after L2-norm)
+            _faiss_index = faiss.IndexFlatIP(EMBED_DIM)
             _faiss_meta = []
             log.info("FAISS index created fresh.")
     return _faiss_index, _faiss_meta
 
 def save_faiss():
     idx, meta = get_faiss()
-    faiss.write_index(idx, str(FAISS_INDEX_PATH))
-    with open(FAISS_META_PATH, "wb") as f:
-        pickle.dump(meta, f)
+    idx_bytes = faiss.serialize_index(idx).tobytes()
+    meta_bytes = pickle.dumps(meta)
+    
+    try:
+        db = get_db()
+        db.faiss_store.update_one(
+            {"_id": "main_index"},
+            {"$set": {"index": idx_bytes, "meta": meta_bytes}},
+            upsert=True
+        )
+    except Exception as e:
+        log.warning(f"Failed to save FAISS to MongoDB (likely during shutdown): {e}")
 
 def get_embed_model():
     global _embed_model
@@ -133,10 +103,6 @@ def get_embed_model():
         _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
         log.info(f"Embedding model loaded: {EMBED_MODEL_NAME}")
     return _embed_model
-
-# =============================================================================
-# 3. PYDANTIC MODELS
-# =============================================================================
 
 class StructuredResume(BaseModel):
     name: str = ""
@@ -191,12 +157,8 @@ class BiasRedactRequest(BaseModel):
     resume_id: str
     enabled: bool = True
 
-# =============================================================================
-# 4. PARSING LAYER
-# =============================================================================
-
 def _parse_pdf(file_bytes: bytes) -> str:
-    import fitz  # PyMuPDF
+    import fitz 
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     return "\n".join(page.get_text() for page in doc)
 
@@ -211,12 +173,8 @@ def parse_file(filename: str, file_bytes: bytes) -> str:
         return _parse_pdf(file_bytes)
     elif ext in (".docx", ".doc"):
         return _parse_docx(file_bytes)
-    else:  # plain text
+    else:
         return file_bytes.decode("utf-8", errors="replace")
-
-# =============================================================================
-# 5. NER EXTRACTION
-# =============================================================================
 
 _nlp = None
 
@@ -232,25 +190,18 @@ def get_nlp():
             _nlp = spacy.load("en_core_web_sm")
     return _nlp
 
-# Comprehensive tech-skill vocabulary
 SKILL_PATTERNS = [
-    # Languages
     "python","java","javascript","typescript","go","rust","c++","c#","ruby","php",
     "swift","kotlin","scala","r","matlab","sql","bash","shell","perl","haskell",
-    # Frameworks/Libraries
     "react","angular","vue","nextjs","django","flask","fastapi","spring","express",
     "tensorflow","pytorch","keras","scikit-learn","pandas","numpy","opencv",
     "nodejs","rails","laravel","dotnet",".net","jquery","bootstrap","tailwind",
-    # Cloud
     "aws","azure","gcp","google cloud","amazon web services","ec2","s3","lambda",
     "kubernetes","docker","terraform","ansible","jenkins","gitlab ci","github actions",
-    # Data
     "mongodb","postgresql","mysql","redis","elasticsearch","kafka","spark","hadoop",
     "snowflake","bigquery","airflow","dbt","tableau","power bi","looker",
-    # AI/ML terms
     "machine learning","deep learning","nlp","computer vision","llm","bert","gpt",
     "transformers","rag","vector database","faiss","langchain","openai",
-    # Other
     "rest api","graphql","microservices","agile","scrum","devops","ci/cd","git",
 ]
 
@@ -273,7 +224,6 @@ DATE_PATTERN = re.compile(
 )
 
 def extract_skills_ner(text: str) -> list[str]:
-    """Fast skill extraction using vocabulary matching + NLP."""
     text_lower = text.lower()
     found = []
     for skill in SKILL_PATTERNS:
@@ -283,7 +233,6 @@ def extract_skills_ner(text: str) -> list[str]:
     return list(set(found))
 
 def extract_experience_entries(text: str) -> tuple[list[dict], float]:
-    """Extract job titles, companies, and date ranges. Returns entries + total years."""
     entries = []
     lines = text.split("\n")
     current = {}
@@ -297,13 +246,11 @@ def extract_experience_entries(text: str) -> tuple[list[dict], float]:
         if not line:
             continue
         line_lower = line.lower()
-        # Detect title line
         if any(kw in line_lower for kw in title_keywords) and len(line) < 120:
             if current:
                 entries.append(current)
             current = {"title": line, "company": "", "dates": [], "description": ""}
         elif current:
-            # Try to grab dates
             dates_found = DATE_PATTERN.findall(line)
             if dates_found:
                 current["dates"].extend(dates_found)
@@ -315,7 +262,6 @@ def extract_experience_entries(text: str) -> tuple[list[dict], float]:
     if current:
         entries.append(current)
 
-    # Estimate years from date mentions in full text
     years = list(map(int, re.findall(r"\b(19\d{2}|20\d{2})\b", text)))
     if len(years) >= 2:
         total_months = (max(years) - min(years)) * 12
@@ -323,7 +269,6 @@ def extract_experience_entries(text: str) -> tuple[list[dict], float]:
     return entries, round(total_months / 12, 1)
 
 def extract_education(text: str) -> list[dict]:
-    """Extract degree + institution pairs."""
     education = []
     lines = text.split("\n")
     for i, line in enumerate(lines):
@@ -339,7 +284,6 @@ def extract_education(text: str) -> list[dict]:
     return education
 
 def extract_contact(text: str) -> tuple[str, str, str]:
-    """Extract name, email, phone from resume text."""
     email = ""
     phone = ""
     name = ""
@@ -352,7 +296,6 @@ def extract_contact(text: str) -> tuple[str, str, str]:
     if phone_match:
         phone = phone_match.group().strip()
 
-    # Name: usually first non-empty line before email
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     for line in lines[:5]:
         if "@" not in line and len(line.split()) in [2, 3] and not any(
@@ -366,7 +309,6 @@ def extract_contact(text: str) -> tuple[str, str, str]:
 async def extract_structured_resume(
     text: str, bias_redact: bool = False
 ) -> StructuredResume:
-    """Full extraction pipeline: fast NER + optional LLM fallback."""
     name, email, phone = extract_contact(text)
     skills = extract_skills_ner(text)
     exp_entries, exp_years = extract_experience_entries(text)
@@ -376,7 +318,6 @@ async def extract_structured_resume(
     if bias_redact:
         redacted_text = apply_bias_redaction(text, name)
 
-    # LLM fallback only if critical fields empty and LLM available
     if not skills and OPENROUTER_KEY:
         llm_data = await llm_extract_fields(text)
         skills = llm_data.get("skills", [])
@@ -391,7 +332,6 @@ async def extract_structured_resume(
     )
 
 async def extract_structured_jd(text: str) -> StructuredJD:
-    """Extract structured fields from a job description."""
     skills = extract_skills_ner(text)
     required = skills[:max(1, len(skills)//2)]
     nice = skills[len(required):]
@@ -410,24 +350,17 @@ async def extract_structured_jd(text: str) -> StructuredJD:
         raw_text=text
     )
 
-# =============================================================================
-# 6. EMBEDDING ENGINE
-# =============================================================================
-
 def embed_text(text: str) -> np.ndarray:
-    """Return L2-normalized embedding for a text string."""
     model = get_embed_model()
     vec = model.encode([text[:512]], normalize_embeddings=True)
     return vec.astype("float32")
 
 def embed_texts(texts: list[str]) -> np.ndarray:
-    """Batch embed and normalize."""
     model = get_embed_model()
     vecs = model.encode(texts, normalize_embeddings=True, batch_size=32, show_progress_bar=False)
     return vecs.astype("float32")
 
 def add_to_faiss(ref_id: str, ref_type: str, text: str) -> int:
-    """Add an embedding to FAISS; return its row index."""
     idx, meta = get_faiss()
     vec = embed_text(text)
     idx.add(vec)
@@ -437,7 +370,6 @@ def add_to_faiss(ref_id: str, ref_type: str, text: str) -> int:
     return row
 
 def faiss_search(query_text: str, top_k: int = 10, filter_type: str = "resume") -> list[dict]:
-    """Search FAISS; return top-k meta entries with similarity scores."""
     idx, meta = get_faiss()
     if idx.ntotal == 0:
         return []
@@ -456,18 +388,15 @@ def faiss_search(query_text: str, top_k: int = 10, filter_type: str = "resume") 
     return results
 
 def get_all_embeddings_2d() -> list[dict]:
-    """PCA-project all FAISS vectors to 2D for the visualizer."""
     from sklearn.decomposition import PCA
     idx, meta = get_faiss()
     if idx.ntotal < 2:
         return []
-    # Reconstruct all vectors
     vecs = np.zeros((idx.ntotal, EMBED_DIM), dtype="float32")
     for i in range(idx.ntotal):
         vecs[i] = faiss.rev_swig_ptr(idx.get_xb(), idx.ntotal * EMBED_DIM)[i * EMBED_DIM: (i+1) * EMBED_DIM]
 
     try:
-        # Use faiss reconstruct_n
         vecs = np.vstack([idx.reconstruct(i) for i in range(idx.ntotal)])
     except Exception:
         return []
@@ -482,17 +411,7 @@ def get_all_embeddings_2d() -> list[dict]:
         result.append({"ref_id": m["ref_id"], "type": m["type"], "x": x, "y": y})
     return result
 
-# =============================================================================
-# 7. SEMANTIC SKILL MATCHING
-# =============================================================================
-
-def semantic_skill_match(
-    candidate_skills: list[str], jd_skills: list[str]
-) -> tuple[list[str], list[str], float]:
-    """
-    Match candidate skills to JD skills using embeddings.
-    Returns: (matched, missing, score 0-1)
-    """
+def semantic_skill_match(candidate_skills: list[str], jd_skills: list[str]) -> tuple[list[str], list[str], float]:
     if not jd_skills:
         return [], [], 1.0
     if not candidate_skills:
@@ -502,7 +421,7 @@ def semantic_skill_match(
     cand_vecs = model.encode(candidate_skills, normalize_embeddings=True)
     jd_vecs   = model.encode(jd_skills, normalize_embeddings=True)
 
-    sim_matrix = np.dot(cand_vecs, jd_vecs.T)  # shape: (n_cand, n_jd)
+    sim_matrix = np.dot(cand_vecs, jd_vecs.T)
     THRESHOLD = 0.70
 
     matched = []
@@ -517,12 +436,7 @@ def semantic_skill_match(
     score = len(matched) / len(jd_skills) if jd_skills else 1.0
     return matched, missing, round(score, 3)
 
-# =============================================================================
-# 8. LLM CLIENT
-# =============================================================================
-
 async def call_llm(system: str, user: str, max_tokens: int = 1024) -> str:
-    """Call OpenRouter LLM. Returns empty string on failure (triggers fallback)."""
     if not OPENROUTER_KEY:
         return ""
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -552,7 +466,6 @@ async def call_llm(system: str, user: str, max_tokens: int = 1024) -> str:
         return ""
 
 async def llm_extract_fields(text: str) -> dict:
-    """LLM fallback to extract structured fields from ambiguous resume text."""
     system = (
         "You are a resume parser. Extract structured information from the provided resume text. "
         "Return ONLY valid JSON with keys: skills (list of strings), education (list of dicts with degree and institution)."
@@ -564,28 +477,19 @@ async def llm_extract_fields(text: str) -> dict:
     except Exception:
         return {"skills": [], "education": []}
 
-# =============================================================================
-# 9. TF-IDF FALLBACK SCORER
-# =============================================================================
-
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity as sk_cosine
 
 def tfidf_score(resume_text: str, jd_text: str) -> float:
-    """Return 1-10 score using TF-IDF cosine similarity as LLM fallback."""
     if not resume_text or not jd_text:
         return 1.0
     try:
         vect = TfidfVectorizer(stop_words="english", max_features=5000)
         matrix = vect.fit_transform([resume_text, jd_text])
         sim = sk_cosine(matrix[0:1], matrix[1:2])[0][0]
-        return round(1 + sim * 9, 2)   # map [0,1] → [1,10]
+        return round(1 + sim * 9, 2)
     except Exception:
         return 1.0
-
-# =============================================================================
-# 10. CORE SCORING PIPELINE
-# =============================================================================
 
 MATCH_SYSTEM_PROMPT = """
 You are an expert technical recruiter and HR analyst.
@@ -615,11 +519,9 @@ async def score_resume_vs_jd(
     jd: StructuredJD,
     bias_redact: bool = False
 ) -> ScoreBreakdown:
-    """Full scoring pipeline. LLM → fallback → zero-hallucination guard."""
     resume_text = resume.redacted_text if bias_redact else resume.raw_text
     jd_text = jd.raw_text
 
-    # Semantic skill match (always runs, no API needed)
     matched_skills, missing_req, skills_sim = semantic_skill_match(
         resume.skills, jd.required_skills
     )
@@ -630,7 +532,6 @@ async def score_resume_vs_jd(
     used_llm = False
     used_fallback = False
 
-    # Attempt LLM scoring
     user_prompt = (
         f"Compare the following resume with this job description and rate fit on 1–10 with justification.\n\n"
         f"=== RESUME ===\n{resume_text[:3000]}\n\n"
@@ -641,7 +542,6 @@ async def score_resume_vs_jd(
     if llm_raw:
         try:
             data = json.loads(llm_raw)
-            # Zero-hallucination safeguard: verify claimed matched skills exist in resume text
             verified_matched = zero_hallucination_guard(
                 data.get("matched_skills", []), resume.raw_text
             )
@@ -660,7 +560,6 @@ async def score_resume_vs_jd(
         except json.JSONDecodeError:
             log.warning("LLM returned non-JSON. Using fallback.")
 
-    # TF-IDF fallback
     used_fallback = True
     fb_score = tfidf_score(resume_text, jd_text)
     exp_score = min(10.0, (resume.experience_years / max(jd.min_experience_years, 1)) * 10)
@@ -680,14 +579,9 @@ async def score_resume_vs_jd(
         used_fallback=True,
     )
 
-# =============================================================================
-# 11. ZERO-HALLUCINATION SAFEGUARD
-# =============================================================================
-
 def zero_hallucination_guard(
     llm_claimed_skills: list[str], resume_text: str
 ) -> list[str]:
-    """Only keep skills that actually appear in the resume text."""
     verified = []
     text_lower = resume_text.lower()
     for skill in llm_claimed_skills:
@@ -696,21 +590,9 @@ def zero_hallucination_guard(
             verified.append(skill)
     return verified
 
-# =============================================================================
-# 12. RESUME AUTHENTICITY CHECKER
-# =============================================================================
-
 def check_authenticity(resume: StructuredResume) -> dict:
-    """
-    Detect internal inconsistencies:
-    - Overlapping employment dates
-    - Unexplained gaps (>6 months)
-    - Title vs description mismatches
-    """
     flags = []
     warnings = []
-
-    # Extract all year ranges
     year_pairs = []
     text = resume.raw_text
     ranges = re.findall(r"((?:19|20)\d{2})\s*(?:–|-|to)\s*((?:19|20)\d{2}|present|current)", text, re.IGNORECASE)
@@ -719,7 +601,6 @@ def check_authenticity(resume: StructuredResume) -> dict:
         end = datetime.now().year if end_str.lower() in ("present", "current") else int(end_str)
         year_pairs.append((start, end))
 
-    # Check for overlaps
     year_pairs_sorted = sorted(year_pairs, key=lambda x: x[0])
     for i in range(len(year_pairs_sorted) - 1):
         s1, e1 = year_pairs_sorted[i]
@@ -731,7 +612,6 @@ def check_authenticity(resume: StructuredResume) -> dict:
                 "severity": "HIGH"
             })
 
-    # Check for unexplained gaps > 6 months (≈ 1 year gap in data)
     for i in range(len(year_pairs_sorted) - 1):
         _, e1 = year_pairs_sorted[i]
         s2, _ = year_pairs_sorted[i + 1]
@@ -743,7 +623,6 @@ def check_authenticity(resume: StructuredResume) -> dict:
                 "severity": "MEDIUM"
             })
 
-    # Title vs description mismatch
     for entry in resume.experience_entries:
         title = entry.get("title", "").lower()
         desc = entry.get("description", "").lower()
@@ -754,7 +633,6 @@ def check_authenticity(resume: StructuredResume) -> dict:
                 "severity": "LOW"
             })
 
-    # Check for suspiciously inflated experience
     all_years = list(map(int, re.findall(r"\b(19\d{2}|20\d{2})\b", text)))
     if all_years:
         span = max(all_years) - min(all_years)
@@ -773,22 +651,12 @@ def check_authenticity(resume: StructuredResume) -> dict:
                       "MEDIUM" if flags or warnings else "LOW"
     }
 
-# =============================================================================
-# 13. DUPLICATE DETECTION
-# =============================================================================
-
 def is_duplicate(new_text: str, db) -> Optional[str]:
-    """Return existing resume _id if duplicate detected, else None."""
-    new_vec = embed_text(new_text)
-    # Compare against FAISS
-    results = faiss_search(new_text, top_k=1, filter_type="resume")
-    if results and results[0]["similarity"] >= DUPLICATE_THRESHOLD:
-        return results[0]["ref_id"]
+    content_hash = hashlib.sha256(new_text.encode('utf-8')).hexdigest()
+    existing = db.resumes.find_one({"content_hash": content_hash})
+    if existing:
+        return str(existing["_id"])
     return None
-
-# =============================================================================
-# 14. JD QUALITY & BIAS ANALYZER
-# =============================================================================
 
 JD_ANALYSIS_PROMPT = """
 You are an expert DEI consultant and HR specialist analyzing a job description.
@@ -807,14 +675,12 @@ Return ONLY valid JSON:
 """
 
 async def analyze_jd_quality(jd_text: str) -> dict:
-    """Analyze JD for quality, vagueness, bias."""
     raw = await call_llm(JD_ANALYSIS_PROMPT, f"Job Description:\n{jd_text[:2500]}", max_tokens=700)
     if raw:
         try:
             return json.loads(raw)
         except Exception:
             pass
-    # Fallback: basic heuristic
     issues = []
     biased_terms = ["rockstar", "ninja", "guru", "wizard", "killer", "aggressive", "young", "fresh"]
     for term in biased_terms:
@@ -830,10 +696,6 @@ async def analyze_jd_quality(jd_text: str) -> dict:
         "improved_summary": "Analysis requires LLM. Basic heuristic applied."
     }
 
-# =============================================================================
-# 15. CANDIDATE FEEDBACK GENERATOR
-# =============================================================================
-
 FEEDBACK_PROMPT = """
 You are a supportive career coach. A candidate was not shortlisted for a role.
 Given their score breakdown and missing skills, generate constructive, specific,
@@ -847,7 +709,6 @@ async def generate_candidate_feedback(
     score: ScoreBreakdown,
     jd_title: str
 ) -> str:
-    """Generate feedback for a non-shortlisted candidate."""
     user = (
         f"Candidate: {candidate_name}\n"
         f"Role applied for: {jd_title}\n"
@@ -874,13 +735,9 @@ async def generate_candidate_feedback(
         result += "\nKeep building your skills and reapply as you grow!"
     return result
 
-# =============================================================================
-# 16. INTERVIEW QUESTIONS & INVITE GENERATOR
-# =============================================================================
-
 IQ_PROMPT = """
 You are a senior technical interviewer. Based on the candidate's skill gaps
-relative to the job description, generate 5–7 targeted interview questions.
+relative to the job description, generate 5-7 targeted interview questions.
 Include mix of: technical depth, behavioral, and situational questions.
 Return as a JSON array of strings. No markdown.
 """
@@ -911,7 +768,7 @@ async def generate_interview_questions(
         "Tell me about a challenging project you've worked on.",
         "How do you stay current with industry trends?",
         "Describe a situation where you had to learn a new skill quickly.",
-        "Where do you see yourself in 3–5 years?",
+        "Where do you see yourself in 3-5 years?",
     ]
 
 async def generate_interview_invite(
@@ -935,10 +792,6 @@ async def generate_interview_invite(
         )
     return result
 
-# =============================================================================
-# 17. RAG CHAT ASSISTANT
-# =============================================================================
-
 RAG_CHAT_PROMPT = """
 You are TalentScan's intelligent recruiter assistant. You have been provided with
 relevant resume excerpts retrieved from the candidate database. Answer the recruiter's
@@ -948,10 +801,7 @@ Be concise and structured. Use bullet points when listing multiple candidates.
 """
 
 async def rag_chat(query: str, history: list[ChatMessage]) -> str:
-    """RAG-based chat: FAISS retrieval → LLM synthesis."""
-    # Retrieve top-k relevant resume chunks
     top_results = faiss_search(query, top_k=5, filter_type="resume")
-
     db = get_db()
     context_parts = []
     for r in top_results:
@@ -971,29 +821,19 @@ async def rag_chat(query: str, history: list[ChatMessage]) -> str:
 
     if not context_parts:
         context_parts = ["No resumes found in the database yet. Please upload resumes first."]
-
     context = "\n\n---\n\n".join(context_parts)
     user_msg = f"Context (retrieved resumes):\n{context}\n\nRecruiter question: {query}"
-
-    # Build history for multi-turn
     messages = []
-    for msg in history[-4:]:  # keep last 4 turns
+    for msg in history[-4:]:
         messages.append({"role": msg.role, "content": msg.content})
-
-    # Direct LLM call with full context
     result = await call_llm(RAG_CHAT_PROMPT, user_msg, max_tokens=600)
     if not result:
-        # Keyword-based fallback
         candidates = [r["ref_id"] for r in top_results]
         result = (
             f"Based on your query, I found {len(candidates)} potentially relevant candidate(s). "
             "LLM synthesis is unavailable — please check the dashboard for detailed profiles."
         )
     return result
-
-# =============================================================================
-# 18. BIAS REDACTION
-# =============================================================================
 
 GENDER_TERMS = re.compile(
     r"\b(mr\.?|mrs\.?|ms\.?|miss|dr\.?|prof\.?|sir|madam|he|she|his|her|him|hers|they|them|their)\b",
@@ -1006,24 +846,16 @@ AGE_TERMS = re.compile(
 )
 
 def apply_bias_redaction(text: str, name: str) -> str:
-    """Redact name, gender markers, and age indicators for blind screening."""
     result = text
     if name:
         result = re.sub(re.escape(name), "[CANDIDATE]", result, flags=re.IGNORECASE)
     result = GENDER_TERMS.sub("[PRONOUN]", result)
     result = AGE_TERMS.sub("[AGE_REDACTED]", result)
-    # Redact email patterns that might encode names
     result = re.sub(r"[\w.+-]+@[\w-]+\.\w+", "[EMAIL_REDACTED]", result)
-    # Redact phone numbers
     result = re.sub(r"(\+?\d[\d\s\-().]{7,15}\d)", "[PHONE_REDACTED]", result)
     return result
 
-# =============================================================================
-# 19. AUDIT LOGGER
-# =============================================================================
-
 def audit_log(db, event_type: str, data: dict):
-    """Write an immutable audit entry."""
     entry = {
         "event_type": event_type,
         "timestamp": datetime.now(timezone.utc),
@@ -1032,13 +864,7 @@ def audit_log(db, event_type: str, data: dict):
     }
     db.audit_logs.insert_one(entry)
 
-# =============================================================================
-# 20. ANALYTICS AGGREGATORS
-# =============================================================================
-
 def get_skill_analytics(db) -> dict:
-    """Aggregate skill demand across all resumes and JDs."""
-    # Most common skills in resumes
     pipeline_resumes = [
         {"$unwind": "$skills"},
         {"$group": {"_id": "$skills", "count": {"$sum": 1}}},
@@ -1047,7 +873,6 @@ def get_skill_analytics(db) -> dict:
     ]
     resume_skills = list(db.resumes.aggregate(pipeline_resumes))
 
-    # Most demanded skills in JDs
     pipeline_jd_req = [
         {"$unwind": "$required_skills"},
         {"$group": {"_id": "$required_skills", "count": {"$sum": 1}}},
@@ -1056,7 +881,6 @@ def get_skill_analytics(db) -> dict:
     ]
     jd_skills = list(db.job_descriptions.aggregate(pipeline_jd_req))
 
-    # Average scores per JD
     pipeline_scores = [
         {"$group": {
             "_id": "$jd_id",
@@ -1078,14 +902,7 @@ def get_skill_analytics(db) -> dict:
         ]
     }
 
-# =============================================================================
-# 21. EXPORT UTILITIES
-# =============================================================================
-
-import csv
-
 def export_shortlist_csv(candidates: list[dict]) -> io.StringIO:
-    """Generate CSV of shortlisted candidates."""
     output = io.StringIO()
     fieldnames = ["name", "email", "score", "skills_score", "experience_score",
                   "education_score", "matched_skills", "missing_required_skills", "justification"]
@@ -1107,10 +924,6 @@ def export_shortlist_csv(candidates: list[dict]) -> io.StringIO:
     output.seek(0)
     return output
 
-# =============================================================================
-# 22. FASTAPI APP & ROUTE HANDLERS
-# =============================================================================
-
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -1129,7 +942,6 @@ app.add_middleware(
 )
 
 def serialize(doc) -> dict:
-    """Convert MongoDB document to JSON-serializable dict."""
     if doc is None:
         return {}
     doc = dict(doc)
@@ -1148,8 +960,6 @@ def obj_id(id_str: str) -> ObjectId:
     except InvalidId:
         raise HTTPException(status_code=400, detail=f"Invalid ID: {id_str}")
 
-# --- Health ---
-
 @app.get("/api/health", tags=["system"])
 async def health():
     db = get_db()
@@ -1167,16 +977,14 @@ async def health():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-# --- Resumes ---
-
 @app.post("/api/resumes/upload", tags=["resumes"])
 async def upload_resumes(
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     bias_redact: bool = Form(False),
-    jd_id: Optional[str] = Form(None)
+    jd_id: Optional[str] = Form(None),
+    x_device_id: Optional[str] = Header(None)
 ):
-    """Upload one or more PDF/DOCX/TXT resumes. Async background processing for bulk."""
     db = get_db()
     results = []
 
@@ -1186,7 +994,6 @@ async def upload_resumes(
         if not text.strip():
             return {"filename": f.filename, "error": "Could not extract text"}
 
-        # Duplicate check
         dup_id = is_duplicate(text, db)
         if dup_id:
             return {"filename": f.filename, "duplicate_of": dup_id, "skipped": True}
@@ -1196,6 +1003,7 @@ async def upload_resumes(
 
         doc = {
             "filename": f.filename,
+            "content_hash": hashlib.sha256(text.encode('utf-8')).hexdigest(),
             "name": structured.name,
             "email": structured.email,
             "phone": structured.phone,
@@ -1203,19 +1011,17 @@ async def upload_resumes(
             "experience_years": structured.experience_years,
             "experience_entries": structured.experience_entries,
             "education": structured.education,
-            "raw_text": structured.raw_text,
             "redacted_text": structured.redacted_text,
             "bias_redacted": bias_redact,
             "authenticity": authenticity,
             "created_at": datetime.now(timezone.utc),
             "versions": [],
+            "device_id": x_device_id
         }
 
-        # Check if candidate exists (same email)
         if structured.email:
             existing = db.resumes.find_one({"email": structured.email})
             if existing:
-                # Version history: append old data to versions
                 db.resumes.update_one(
                     {"_id": existing["_id"]},
                     {"$push": {"versions": {
@@ -1235,7 +1041,6 @@ async def upload_resumes(
             result = db.resumes.insert_one(doc)
             resume_id = str(result.inserted_id)
 
-        # Index into FAISS
         add_to_faiss(resume_id, "resume", text)
 
         audit_log(db, "RESUME_UPLOADED", {
@@ -1244,7 +1049,6 @@ async def upload_resumes(
             "bias_redacted": bias_redact
         })
 
-        # Auto-score if JD provided
         if jd_id:
             background_tasks.add_task(_background_score, resume_id, jd_id, bias_redact)
 
@@ -1259,7 +1063,6 @@ async def upload_resumes(
     return {"uploaded": len(results), "results": results}
 
 async def _background_score(resume_id: str, jd_id: str, bias_redact: bool = False):
-    """Background task: score a resume vs a JD."""
     db = get_db()
     try:
         resume_doc = db.resumes.find_one({"_id": obj_id(resume_id)})
@@ -1301,16 +1104,22 @@ async def _background_score(resume_id: str, jd_id: str, bias_redact: bool = Fals
 @app.get("/api/resumes", tags=["resumes"])
 async def list_resumes(
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200)
+    limit: int = Query(50, ge=1, le=200),
+    x_device_id: Optional[str] = Header(None)
 ):
     db = get_db()
-    docs = list(db.resumes.find({}, {"raw_text": 0, "redacted_text": 0})
+    
+    query = {}
+    if x_device_id:
+        query["device_id"] = x_device_id
+
+    docs = list(db.resumes.find(query, {"raw_text": 0, "redacted_text": 0})
                 .sort("created_at", DESCENDING)
                 .skip(skip).limit(limit))
-    return {"resumes": [serialize(d) for d in docs], "total": db.resumes.count_documents({})}
+    return {"resumes": [serialize(d) for d in docs], "total": db.resumes.count_documents(query)}
 
 @app.get("/api/resumes/{resume_id}", tags=["resumes"])
-async def get_resume(resume_id: str):
+async def get_resume(resume_id: str, x_device_id: Optional[str] = Header(None)):
     db = get_db()
     doc = db.resumes.find_one({"_id": obj_id(resume_id)})
     if not doc:
@@ -1318,8 +1127,12 @@ async def get_resume(resume_id: str):
     return serialize(doc)
 
 @app.delete("/api/resumes/{resume_id}", tags=["resumes"])
-async def delete_resume(resume_id: str):
+async def delete_resume(resume_id: str, x_device_id: Optional[str] = Header(None)):
     db = get_db()
+    doc = db.resumes.find_one({"_id": obj_id(resume_id)})
+    if doc and doc.get("device_id") and doc.get("device_id") != x_device_id:
+        raise HTTPException(403, "Not authorized to delete this resume")
+
     result = db.resumes.delete_one({"_id": obj_id(resume_id)})
     if result.deleted_count == 0:
         raise HTTPException(404, "Resume not found")
@@ -1327,14 +1140,12 @@ async def delete_resume(resume_id: str):
     audit_log(db, "RESUME_DELETED", {"resume_id": resume_id})
     return {"deleted": True}
 
-# --- Job Descriptions ---
-
 @app.post("/api/jd/upload", tags=["jd"])
 async def upload_jd(
+    title: str = Form(None),
     text: str = Form(None),
     file: Optional[UploadFile] = File(None)
 ):
-    """Upload or paste a job description. Analyzes quality/bias."""
     db = get_db()
     if file:
         file_bytes = await file.read()
@@ -1348,7 +1159,7 @@ async def upload_jd(
     quality = await analyze_jd_quality(jd_text)
 
     doc = {
-        "title": structured.title,
+        "title": title.strip() if title and title.strip() else structured.title,
         "required_skills": structured.required_skills,
         "nice_to_have_skills": structured.nice_to_have_skills,
         "min_experience_years": structured.min_experience_years,
@@ -1359,10 +1170,7 @@ async def upload_jd(
     }
     result = db.job_descriptions.insert_one(doc)
     jd_id = str(result.inserted_id)
-
-    # Index JD in FAISS
     add_to_faiss(jd_id, "jd", jd_text)
-
     audit_log(db, "JD_UPLOADED", {"jd_id": jd_id, "title": structured.title})
     return {"jd_id": jd_id, **serialize(doc)}
 
@@ -1390,15 +1198,12 @@ async def delete_jd(jd_id: str):
     audit_log(db, "JD_DELETED", {"jd_id": jd_id})
     return {"deleted": True}
 
-# --- Scoring ---
-
 @app.post("/api/match/score", tags=["matching"])
 async def score_single(
     resume_id: str = Form(...),
     jd_id: str = Form(...),
     bias_redact: bool = Form(False)
 ):
-    """Score a single resume against a JD."""
     db = get_db()
     resume_doc = db.resumes.find_one({"_id": obj_id(resume_id)})
     jd_doc = db.job_descriptions.find_one({"_id": obj_id(jd_id)})
@@ -1444,7 +1249,6 @@ async def score_single(
         "score": breakdown.overall_score, "used_llm": breakdown.used_llm
     })
 
-    # Auto-generate interview questions
     questions = await generate_interview_questions(
         breakdown.missing_required_skills, jd.title
     )
@@ -1461,14 +1265,12 @@ async def score_single(
 async def score_bulk(
     background_tasks: BackgroundTasks,
     jd_id: str = Form(...),
-    resume_ids: str = Form(...),  # comma-separated
+    resume_ids: str = Form(""),
     bias_redact: bool = Form(False)
 ):
-    """Score multiple resumes against one JD (async background). Returns job info."""
     db = get_db()
     ids = [r.strip() for r in resume_ids.split(",") if r.strip()]
     if not ids:
-        # Score all resumes
         all_docs = list(db.resumes.find({}, {"_id": 1}))
         ids = [str(d["_id"]) for d in all_docs]
 
@@ -1486,12 +1288,9 @@ async def score_matrix(
     background_tasks: BackgroundTasks,
     request: MatrixRequest
 ):
-    """N×M matching matrix: all/selected resumes vs all/selected JDs."""
     db = get_db()
     resume_ids = request.resume_ids or [str(d["_id"]) for d in db.resumes.find({}, {"_id": 1})]
     jd_ids = request.jd_ids or [str(d["_id"]) for d in db.job_descriptions.find({}, {"_id": 1})]
-
-    # Return existing scores for the matrix (compute missing in background)
     matrix = []
     for r_id in resume_ids:
         row = {"resume_id": r_id}
@@ -1504,7 +1303,6 @@ async def score_matrix(
                 background_tasks.add_task(_background_score, r_id, j_id)
         matrix.append(row)
 
-    # Enrich with names
     for row in matrix:
         r_doc = db.resumes.find_one({"_id": obj_id(row["resume_id"])}, {"name": 1})
         row["candidate_name"] = r_doc.get("name", "Unknown") if r_doc else "Unknown"
@@ -1516,60 +1314,25 @@ async def score_matrix(
 
     return {"matrix": matrix, "resume_ids": resume_ids, "jd_ids": jd_ids, "jd_titles": jd_titles}
 
-# --- Shortlist ---
-
-@app.get("/api/shortlist/{jd_id}", tags=["shortlist"])
-async def get_shortlist(
+@app.get("/api/analysis/{jd_id}", tags=["analysis"])
+async def get_analysis(
     jd_id: str,
-    min_score: float = Query(0.0),
-    sort_by: str = Query("score"),
     limit: int = Query(50)
 ):
-    """Return ranked shortlist for a JD."""
     db = get_db()
-    sort_field = sort_by if sort_by in ["score","skills_score","experience_score","education_score"] else "score"
-    docs = list(db.scores.find({"jd_id": jd_id, "score": {"$gte": min_score}})
-                .sort(sort_field, DESCENDING).limit(limit))
+    docs = list(db.scores.find({"jd_id": jd_id}).limit(limit))
     return {"shortlist": [serialize(d) for d in docs], "total": len(docs)}
 
-@app.post("/api/match/weight-simulate", tags=["shortlist"])
-async def weight_simulate(req: WeightSimulateRequest):
-    """Re-rank shortlist using custom weights on cached sub-scores. No LLM call."""
-    db = get_db()
-    docs = list(db.scores.find({"jd_id": req.jd_id}))
-    ranked = []
-    for d in docs:
-        ws = float(d.get("skills_score", 0))
-        we = float(d.get("experience_score", 0))
-        wu = float(d.get("education_score", 0))
-        custom_score = (
-            ws * req.skills_weight +
-            we * req.experience_weight +
-            wu * req.education_weight
-        ) / (req.skills_weight + req.experience_weight + req.education_weight)
-        ranked.append({
-            "resume_id": d["resume_id"],
-            "candidate_name": d.get("candidate_name",""),
-            "custom_score": round(custom_score, 2),
-            "skills_score": ws, "experience_score": we, "education_score": wu,
-        })
-    ranked.sort(key=lambda x: x["custom_score"], reverse=True)
-    return {"ranked": ranked, "weights": req.dict()}
 
-# --- Chat ---
 
 @app.post("/api/chat", tags=["chat"])
 async def chat(req: ChatRequest):
-    """RAG-powered recruiter chat assistant."""
     response = await rag_chat(req.query, req.history)
     audit_log(get_db(), "CHAT_QUERY", {"query": req.query[:200]})
     return {"response": response, "query": req.query}
 
-# --- Feedback ---
-
 @app.post("/api/feedback/{resume_id}/{jd_id}", tags=["feedback"])
 async def get_feedback(resume_id: str, jd_id: str):
-    """Generate constructive feedback for a non-shortlisted candidate."""
     db = get_db()
     score_doc = db.scores.find_one({"resume_id": resume_id, "jd_id": jd_id})
     resume_doc = db.resumes.find_one({"_id": obj_id(resume_id)})
@@ -1602,7 +1365,6 @@ async def get_feedback(resume_id: str, jd_id: str):
 
 @app.post("/api/interview-invite/{resume_id}/{jd_id}", tags=["feedback"])
 async def get_interview_invite(resume_id: str, jd_id: str):
-    """Generate a personalized interview invite email."""
     db = get_db()
     score_doc = db.scores.find_one({"resume_id": resume_id, "jd_id": jd_id})
     resume_doc = db.resumes.find_one({"_id": obj_id(resume_id)})
@@ -1619,7 +1381,6 @@ async def get_interview_invite(resume_id: str, jd_id: str):
 
 @app.post("/api/interview-questions/{resume_id}/{jd_id}", tags=["feedback"])
 async def get_interview_questions(resume_id: str, jd_id: str):
-    """Generate interview questions based on candidate's skill gaps."""
     db = get_db()
     score_doc = db.scores.find_one({"resume_id": resume_id, "jd_id": jd_id})
     jd_doc = db.job_descriptions.find_one({"_id": obj_id(jd_id)})
@@ -1634,95 +1395,24 @@ async def get_interview_questions(resume_id: str, jd_id: str):
 
 @app.get("/api/authenticity/{resume_id}", tags=["analysis"])
 async def get_authenticity(resume_id: str):
-    """Get authenticity analysis for a resume."""
     db = get_db()
     doc = db.resumes.find_one({"_id": obj_id(resume_id)})
     if not doc:
         raise HTTPException(404, "Resume not found")
     return doc.get("authenticity", {"flags": [], "warnings": [], "is_authentic": True, "risk_level": "LOW"})
 
-# --- Analytics ---
-
 @app.get("/api/analytics/skills", tags=["analytics"])
 async def analytics_skills():
     db = get_db()
     return get_skill_analytics(db)
 
-@app.get("/api/analytics/embeddings", tags=["analytics"])
-async def analytics_embeddings():
-    """2D PCA projection of all resume/JD embeddings."""
-    points = get_all_embeddings_2d()
-    db = get_db()
-    # Enrich with names
-    enriched = []
-    for p in points:
-        name = p["ref_id"]
-        if p["type"] == "resume":
-            doc = db.resumes.find_one({"_id": obj_id(p["ref_id"])}, {"name": 1, "latest_score": 1})
-            if doc:
-                name = doc.get("name", p["ref_id"])
-                p["score"] = doc.get("latest_score", None)
-        elif p["type"] == "jd":
-            doc = db.job_descriptions.find_one({"_id": obj_id(p["ref_id"])}, {"title": 1})
-            if doc:
-                name = doc.get("title", p["ref_id"])
-        p["label"] = name
-        enriched.append(p)
-    return {"points": enriched}
 
-@app.get("/api/analytics/score-distribution/{jd_id}", tags=["analytics"])
-async def score_distribution(jd_id: str):
-    """Score histogram for a JD."""
-    db = get_db()
-    docs = list(db.scores.find({"jd_id": jd_id}, {"score": 1}))
-    scores = [d["score"] for d in docs]
-    buckets = [0] * 10  # 1-2, 2-3, ..., 9-10
-    for s in scores:
-        idx = min(int(s) - 1, 9)
-        if idx >= 0:
-            buckets[idx] += 1
-    return {
-        "buckets": [{"range": f"{i+1}-{i+2}", "count": buckets[i]} for i in range(10)],
-        "total": len(scores),
-        "average": round(sum(scores)/len(scores), 2) if scores else 0
-    }
-
-# --- Audit ---
-
-@app.get("/api/audit", tags=["audit"])
-async def get_audit_log(
-    skip: int = Query(0),
-    limit: int = Query(100)
-):
-    db = get_db()
-    docs = list(db.audit_logs.find({}).sort("timestamp", DESCENDING).skip(skip).limit(limit))
-    return {"logs": [serialize(d) for d in docs], "total": db.audit_logs.count_documents({})}
-
-# --- Export ---
-
-@app.get("/api/export/shortlist/{jd_id}", tags=["export"])
-async def export_shortlist(jd_id: str, min_score: float = Query(0.0)):
-    db = get_db()
-    docs = list(db.scores.find({"jd_id": jd_id, "score": {"$gte": min_score}})
-                .sort("score", DESCENDING))
-    candidates = [serialize(d) for d in docs]
-    csv_output = export_shortlist_csv(candidates)
-    return StreamingResponse(
-        iter([csv_output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=shortlist_{jd_id}.csv"}
-    )
-
-# =============================================================================
-# 23. STARTUP / SHUTDOWN
-# =============================================================================
 
 @app.on_event("startup")
 async def startup_event():
     log.info("TalentScan API starting up...")
     get_db()
     get_faiss()
-    # Pre-load embedding model in background
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, get_embed_model)
     log.info("TalentScan API ready.")

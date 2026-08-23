@@ -1,21 +1,17 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import Dashboard from './pages/Dashboard';
-import Upload from './pages/Upload';
+import DataStudio from './pages/DataStudio';
 import Analytics from './pages/Analytics';
 import Chat from './pages/Chat';
 import CandidateDetail from './pages/CandidateDetail';
-import JDManager from './pages/JDManager';
-import AuditLog from './pages/AuditLog';
 
 const NAV_ITEMS = [
   { to: '/',         icon: '📊', label: 'Dashboard'   },
-  { to: '/upload',   icon: '📤', label: 'Upload'       },
-  { to: '/jd',       icon: '📋', label: 'JD Manager'  },
+  { to: '/data-studio', icon: '🗂️', label: 'Data Studio' },
   { to: '/analytics',icon: '📈', label: 'Analytics'    },
   { to: '/chat',     icon: '💬', label: 'AI Chat'      },
-  { to: '/audit',    icon: '🔍', label: 'Audit Log'    },
 ];
 
 function Sidebar() {
@@ -47,6 +43,16 @@ function Sidebar() {
   );
 }
 
+function NotFound() {
+  return (
+    <div className="empty-state" style={{ height: '80vh' }}>
+      <div className="empty-state-icon" style={{ fontSize: '4rem' }}>404</div>
+      <div className="empty-state-title" style={{ fontSize: '1.5rem', marginTop: 16 }}>Page Not Found</div>
+      <div className="empty-state-desc">The page you're looking for doesn't exist or has been moved.</div>
+    </div>
+  );
+}
+
 function App() {
   return (
     <BrowserRouter>
@@ -55,12 +61,11 @@ function App() {
         <main className="main-content">
           <Routes>
             <Route path="/"              element={<Dashboard />} />
-            <Route path="/upload"        element={<Upload />} />
-            <Route path="/jd"            element={<JDManager />} />
+            <Route path="/data-studio"   element={<DataStudio />} />
             <Route path="/analytics"     element={<Analytics />} />
             <Route path="/chat"          element={<Chat />} />
-            <Route path="/audit"         element={<AuditLog />} />
             <Route path="/candidate/:id" element={<CandidateDetail />} />
+            <Route path="*"              element={<NotFound />} />
           </Routes>
         </main>
       </div>

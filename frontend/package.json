@@ -3,31 +3,44 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
+    "@craco/craco": "^7.1.0",
     "@testing-library/jest-dom": "^5.17.0",
     "@testing-library/react": "^13.4.0",
     "@testing-library/user-event": "^13.5.0",
     "axios": "^1.7.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-dropzone": "^14.2.3",
+    "react-hot-toast": "^2.4.1",
     "react-router-dom": "^6.23.1",
     "react-scripts": "5.0.1",
     "recharts": "^2.12.7",
-    "react-dropzone": "^14.2.3",
-    "react-hot-toast": "^2.4.1",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "postinstall": "node -e \"var fs=require('fs'),f='node_modules/fork-ts-checker-webpack-plugin/node_modules/ajv-keywords/keywords/_formatLimit.js';if(fs.existsSync(f)){var c=fs.readFileSync(f,'utf8');if(c.includes('var formats = ajv._formats;')){fs.writeFileSync(f,c.replace('var formats = ajv._formats;','var formats = ajv._formats || {};'));console.log('ajv-keywords patched');}}\" || true"
   },
   "eslintConfig": {
-    "extends": ["react-app", "react-app/jest"]
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
   },
   "browserslist": {
-    "production": [">0.2%", "not dead", "not op_mini all"],
-    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
   },
   "overrides": {
     "ajv": "^8.0.0"

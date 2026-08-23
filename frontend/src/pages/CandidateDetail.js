@@ -4,7 +4,6 @@ import {
   getResume, listJDs, scoreResume, getFeedback,
   getInterviewInvite, getInterviewQuestions, getAuthenticity
 } from '../api';
-import { ScoreRing, SubScoreBar } from '../components/CandidateCard';
 import toast from 'react-hot-toast';
 
 function Section({ title, icon, children }) {
@@ -21,10 +20,10 @@ function Section({ title, icon, children }) {
 function CandidateDetail() {
   const { id } = useParams();
   const [resume, setResume] = useState(null);
-  const [jds, setJDs]       = useState([]);
+  const [jds, setJDs] = useState([]);
   const [selectedJD, setSelectedJD] = useState('');
-  const [score, setScore]   = useState(null);
-  const [auth, setAuth]     = useState(null);
+  const [score, setScore] = useState(null);
+  const [auth, setAuth] = useState(null);
   const [feedback, setFeedback] = useState('');
   const [invite, setInvite] = useState('');
   const [questions, setQuestions] = useState([]);
@@ -39,7 +38,7 @@ function CandidateDetail() {
         if (jdList.length) setSelectedJD(jdList[0].id);
       })
       .catch(() => toast.error('Failed to load candidate'));
-    getAuthenticity(id).then(r => setAuth(r.data)).catch(() => {});
+    getAuthenticity(id).then(r => setAuth(r.data)).catch(() => { });
   }, [id]);
 
   const handleScore = async () => {
@@ -61,6 +60,7 @@ function CandidateDetail() {
 
   const handleFeedback = async () => {
     if (!selectedJD) { toast.error('Select a JD'); return; }
+    if (!score) { toast.error('Please score the candidate first!'); return; }
     setLoading(p => ({ ...p, feedback: true }));
     try {
       const res = await getFeedback(id, selectedJD);
@@ -75,6 +75,7 @@ function CandidateDetail() {
 
   const handleInvite = async () => {
     if (!selectedJD) { toast.error('Select a JD'); return; }
+    if (!score) { toast.error('Please score the candidate first!'); return; }
     setLoading(p => ({ ...p, invite: true }));
     try {
       const res = await getInterviewInvite(id, selectedJD);
@@ -89,6 +90,7 @@ function CandidateDetail() {
 
   const handleQuestions = async () => {
     if (!selectedJD) { toast.error('Select a JD'); return; }
+    if (!score) { toast.error('Please score the candidate first!'); return; }
     setLoading(p => ({ ...p, questions: true }));
     try {
       const res = await getInterviewQuestions(id, selectedJD);
@@ -109,7 +111,6 @@ function CandidateDetail() {
 
   return (
     <div className="animate-fade-in">
-      {/* Header */}
       <div className="page-header">
         <Link to="/" className="btn btn-ghost btn-sm" style={{ marginBottom: 12 }}>← Back to Dashboard</Link>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 24, flexWrap: 'wrap' }}>
@@ -138,15 +139,9 @@ function CandidateDetail() {
             </div>
           </div>
 
-          {score && (
-            <div style={{ marginLeft: 'auto' }}>
-              <ScoreRing score={score.overall_score} size={100} />
-            </div>
-          )}
         </div>
       </div>
 
-      {/* JD selector + score controls */}
       <div className="card mb-4">
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <div className="form-group" style={{ flex: 1, minWidth: 200, marginBottom: 0 }}>
@@ -157,7 +152,7 @@ function CandidateDetail() {
             </select>
           </div>
           <button id="detail-score-btn" className="btn btn-primary" onClick={handleScore} disabled={loading.score || !selectedJD}>
-            {loading.score ? '⟳ Scoring...' : '🎯 Score vs JD'}
+            {loading.score ? '⟳ Analyzing...' : '🔍 Analyze vs JD'}
           </button>
           {score && (
             <>
@@ -176,69 +171,51 @@ function CandidateDetail() {
       </div>
 
       <div className="grid-2" style={{ alignItems: 'start' }}>
-        {/* Left column */}
         <div>
-          {/* Score breakdown */}
           {score && (
-            <Section title="Score Breakdown" icon="🎯">
-              <div style={{ marginBottom: 16 }}>
-                <SubScoreBar label="Skills Match"   value={score.skills_score} />
-                <SubScoreBar label="Experience"     value={score.experience_score} />
-                <SubScoreBar label="Education"      value={score.education_score} />
-              </div>
-              {score.justification && (
+            <Section title="Gap Analysis" icon="🔍">
+              {score.missing_required_skills?.length > 0 ? (
                 <div style={{
-                  background: 'rgba(99,102,241,0.06)', borderRadius: 'var(--radius-sm)',
-                  padding: '10px 14px', fontSize: '0.85rem', color: 'var(--text-secondary)',
-                  borderLeft: '3px solid var(--brand-primary)', fontStyle: 'italic',
+                  background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.15)',
+                  borderRadius: 'var(--radius-sm)', padding: '12px', marginBottom: 14,
                 }}>
+                  <div style={{ fontSize: '0.72rem', color: '#ef4444', marginBottom: 8, fontWeight: 600, textTransform: 'uppercase' }}>
+                    ❌ Missing {score.missing_required_skills.length} Required Skill{score.missing_required_skills.length !== 1 ? 's' : ''}
+                  </div>
+                  <div className="skill-tags">
+                    {score.missing_required_skills.map(s => <span key={s} className="skill-tag skill-tag-missing">{s}</span>)}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 'var(--radius-sm)', padding: '10px 14px', marginBottom: 14, fontSize: '0.85rem', color: 'var(--brand-success)', fontWeight: 600 }}>
+                  ✅ All required skills matched!
+                </div>
+              )}
+              {score.matched_skills?.length > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--brand-success)', marginBottom: 6 }}>✓ MATCHED</div>
+                  <div className="skill-tags">
+                    {score.matched_skills.map(s => <span key={s} className="skill-tag skill-tag-matched">{s}</span>)}
+                  </div>
+                </div>
+              )}
+              {score.justification && (
+                <div style={{ background: 'rgba(99,102,241,0.06)', borderRadius: 'var(--radius-sm)', padding: '10px 14px', fontSize: '0.85rem', color: 'var(--text-secondary)', borderLeft: '3px solid var(--brand-primary)', fontStyle: 'italic', marginTop: 8 }}>
                   {score.justification}
                 </div>
               )}
-              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                {score.used_llm && <span className="badge badge-primary">🤖 AI Scored</span>}
-                {score.used_fallback && <span className="badge badge-neutral">TF-IDF Fallback</span>}
-              </div>
             </Section>
           )}
 
-          {/* Skills */}
           <Section title="Skills" icon="💡">
-            {score ? (
-              <div>
-                {score.matched_skills?.length > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--brand-success)', marginBottom: 6 }}>✓ MATCHED</div>
-                    <div className="skill-tags">
-                      {score.matched_skills.map(s => <span key={s} className="skill-tag skill-tag-matched">{s}</span>)}
-                    </div>
-                  </div>
-                )}
-                {score.missing_required_skills?.length > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--brand-danger)', marginBottom: 6 }}>✗ MISSING REQUIRED</div>
-                    <div className="skill-tags">
-                      {score.missing_required_skills.map(s => <span key={s} className="skill-tag skill-tag-missing">{s}</span>)}
-                    </div>
-                  </div>
-                )}
-                {score.missing_nice_to_have_skills?.length > 0 && (
-                  <div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--brand-warning)', marginBottom: 6 }}>~ MISSING NICE-TO-HAVE</div>
-                    <div className="skill-tags">
-                      {score.missing_nice_to_have_skills.map(s => <span key={s} className="skill-tag skill-tag-neutral">{s}</span>)}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="skill-tags">
-                {(resume.skills || []).map(s => <span key={s} className="skill-tag skill-tag-neutral">{s}</span>)}
-              </div>
-            )}
+            <div className="skill-tags">
+              {(resume.skills || []).length > 0
+                ? resume.skills.map(s => <span key={s} className="skill-tag skill-tag-neutral">{s}</span>)
+                : <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No skills extracted</span>
+              }
+            </div>
           </Section>
 
-          {/* Experience */}
           <Section title="Experience" icon="💼">
             {(resume.experience_entries || []).length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -267,7 +244,6 @@ function CandidateDetail() {
             )}
           </Section>
 
-          {/* Education */}
           <Section title="Education" icon="🎓">
             {(resume.education || []).length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -284,9 +260,7 @@ function CandidateDetail() {
           </Section>
         </div>
 
-        {/* Right column */}
         <div>
-          {/* Authenticity */}
           {auth && (
             <Section title="Authenticity Check" icon="🔍">
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
@@ -318,7 +292,6 @@ function CandidateDetail() {
             </Section>
           )}
 
-          {/* Resume Version History */}
           {resume.versions?.length > 0 && (
             <Section title="Version History" icon="📝">
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -336,7 +309,6 @@ function CandidateDetail() {
             </Section>
           )}
 
-          {/* Feedback */}
           {feedback && (
             <Section title="Candidate Feedback" icon="💬">
               <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
@@ -352,7 +324,6 @@ function CandidateDetail() {
             </Section>
           )}
 
-          {/* Interview Invite */}
           {invite && (
             <Section title="Interview Invite Email" icon="✉️">
               <div style={{
@@ -372,7 +343,6 @@ function CandidateDetail() {
             </Section>
           )}
 
-          {/* Interview Questions */}
           {questions.length > 0 && (
             <Section title="Interview Questions" icon="❓">
               <ol style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -382,7 +352,7 @@ function CandidateDetail() {
                     padding: '10px 14px', fontSize: '0.85rem', color: 'var(--text-secondary)',
                     borderLeft: '3px solid var(--brand-accent)',
                   }}>
-                    <span style={{ fontWeight: 700, color: 'var(--brand-accent)', marginRight: 8 }}>Q{i+1}.</span>
+                    <span style={{ fontWeight: 700, color: 'var(--brand-accent)', marginRight: 8 }}>Q{i + 1}.</span>
                     {q}
                   </li>
                 ))}

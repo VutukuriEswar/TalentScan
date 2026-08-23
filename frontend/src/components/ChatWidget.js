@@ -63,7 +63,6 @@ function ChatWidget({ className = '' }) {
 
   return (
     <div className={`chat-container card ${className}`} style={{ padding: 0, overflow: 'hidden' }}>
-      {/* Header */}
       <div style={{
         padding: '16px 20px', borderBottom: '1px solid var(--border-subtle)',
         display: 'flex', alignItems: 'center', gap: 10,
@@ -84,7 +83,6 @@ function ChatWidget({ className = '' }) {
         </div>
       </div>
 
-      {/* Messages */}
       <div className="chat-messages" style={{ padding: '16px 20px' }}>
         {messages.map(msg => (
           <div key={msg.id} className={`chat-message ${msg.role}`}>
@@ -103,7 +101,7 @@ function ChatWidget({ className = '' }) {
           <div className="chat-message assistant">
             <div className="chat-avatar assistant">🤖</div>
             <div className="chat-bubble assistant" style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-              {[0,1,2].map(i => (
+              {[0, 1, 2].map(i => (
                 <div key={i} style={{
                   width: 6, height: 6, borderRadius: '50%',
                   background: 'var(--brand-accent)',
@@ -117,7 +115,6 @@ function ChatWidget({ className = '' }) {
         <div ref={bottomRef} />
       </div>
 
-      {/* Suggestions */}
       {messages.length <= 2 && (
         <div style={{ padding: '0 20px 12px', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {SUGGESTIONS.map((s, i) => (
@@ -134,7 +131,6 @@ function ChatWidget({ className = '' }) {
         </div>
       )}
 
-      {/* Input */}
       <div className="chat-input-row">
         <textarea
           id="chat-input-field"

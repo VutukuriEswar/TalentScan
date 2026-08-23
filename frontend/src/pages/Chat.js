@@ -12,7 +12,6 @@ function Chat() {
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 280px', gap: 20, minHeight: 0 }}>
         <ChatWidget style={{ height: '100%' }} />
 
-        {/* Tips panel */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div className="card">
             <div className="card-title" style={{ marginBottom: 12 }}>💡 Query Examples</div>

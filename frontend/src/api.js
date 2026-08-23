@@ -5,6 +5,21 @@ const api = axios.create({
   timeout: 60000,
 });
 
+// Device ID (Privacy)
+const getDeviceId = () => {
+  let id = localStorage.getItem('ts_device_id');
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
+    localStorage.setItem('ts_device_id', id);
+  }
+  return id;
+};
+
+api.interceptors.request.use((config) => {
+  config.headers['X-Device-ID'] = getDeviceId();
+  return config;
+});
+
 // Resumes
 export const uploadResumes = (formData, onProgress) =>
   api.post('/api/resumes/upload', formData, {
@@ -29,11 +44,10 @@ export const scoreResume = (formData) =>
   api.post('/api/match/score', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
 export const scoreBulk = (formData) =>
   api.post('/api/match/bulk', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-export const scoreMatrix = (data) => api.post('/api/match/matrix', data);
-export const weightSimulate = (data) => api.post('/api/match/weight-simulate', data);
 
-// Shortlist
-export const getShortlist = (jdId, params) => api.get(`/api/shortlist/${jdId}`, { params });
+
+// Gap Analysis
+export const getAnalysis = (jdId, params) => api.get(`/api/analysis/${jdId}`, { params });
 
 // Chat
 export const sendChat = (data) => api.post('/api/chat', data);
@@ -45,18 +59,9 @@ export const getInterviewQuestions = (resumeId, jdId) => api.post(`/api/intervie
 
 // Analytics
 export const getSkillAnalytics = () => api.get('/api/analytics/skills');
-export const getEmbeddings = () => api.get('/api/analytics/embeddings');
 export const getScoreDistribution = (jdId) => api.get(`/api/analytics/score-distribution/${jdId}`);
 
-// Audit
-export const getAuditLog = (params) => api.get('/api/audit', { params });
 
-// Export
-export const exportShortlist = (jdId, minScore = 0) =>
-  api.get(`/api/export/shortlist/${jdId}`, {
-    params: { min_score: minScore },
-    responseType: 'blob',
-  });
 
 // Health
 export const healthCheck = () => api.get('/api/health');

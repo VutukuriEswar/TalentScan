@@ -1,33 +1,27 @@
 import React, { useEffect, useState } from 'react';
-import { getSkillAnalytics, getEmbeddings, listJDs, getScoreDistribution, scoreMatrix } from '../api';
+import { getSkillAnalytics, listJDs, getScoreDistribution } from '../api';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
-  AreaChart, Area, PieChart, Pie, Cell, Legend
+  AreaChart, Area, PieChart, Pie, Cell
 } from 'recharts';
-import EmbeddingVisualizer from '../components/EmbeddingVisualizer';
-import HeatmapMatrix from '../components/HeatmapMatrix';
+
 import toast from 'react-hot-toast';
 
-const COLORS = ['#6366f1','#8b5cf6','#06b6d4','#10b981','#f59e0b','#ef4444','#ec4899','#84cc16'];
+const COLORS = ['#6366f1', '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#84cc16'];
 
 function Analytics() {
-  const [skillData, setSkillData]   = useState(null);
-  const [embedPoints, setEmbedPoints] = useState([]);
-  const [jds, setJDs]               = useState([]);
+  const [skillData, setSkillData] = useState(null);
+  const [jds, setJDs] = useState([]);
   const [selectedJD, setSelectedJD] = useState('');
-  const [distData, setDistData]     = useState([]);
-  const [matrix, setMatrix]         = useState({ matrix: [], jd_ids: [], jd_titles: {} });
-  const [loading, setLoading]       = useState(true);
-  const [matrixLoading, setMatrixLoading] = useState(false);
+  const [distData, setDistData] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     Promise.all([
       getSkillAnalytics(),
-      getEmbeddings(),
       listJDs(),
-    ]).then(([skill, embed, jdRes]) => {
+    ]).then(([skill, jdRes]) => {
       setSkillData(skill.data);
-      setEmbedPoints(embed.data.points || []);
       const jdList = jdRes.data.jds || [];
       setJDs(jdList);
       if (jdList.length) {
@@ -38,34 +32,24 @@ function Analytics() {
       .finally(() => setLoading(false));
   }, []);
 
+
   const loadDist = async (jdId) => {
     try {
       const res = await getScoreDistribution(jdId);
       setDistData(res.data.buckets || []);
-    } catch (e) {}
+    } catch (e) { }
   };
 
-  const loadMatrix = async () => {
-    setMatrixLoading(true);
-    try {
-      const res = await scoreMatrix({ resume_ids: [], jd_ids: [] });
-      setMatrix(res.data);
-    } catch (e) {
-      toast.error('Matrix load failed');
-    } finally {
-      setMatrixLoading(false);
-    }
-  };
+
 
   if (loading) return (
     <div className="loading-overlay"><div className="spinner" /><span>Loading analytics...</span></div>
   );
 
   const resumeSkills = skillData?.top_resume_skills?.slice(0, 12) || [];
-  const jdSkills     = skillData?.top_jd_skills?.slice(0, 8) || [];
-  const scoreStats   = skillData?.score_stats_by_jd || [];
+  const jdSkills = skillData?.top_jd_skills?.slice(0, 8) || [];
+  const scoreStats = skillData?.score_stats_by_jd || [];
 
-  // Pie data: resume skills
   const pieData = resumeSkills.slice(0, 8).map((s, i) => ({
     name: s.skill, value: s.count, color: COLORS[i % COLORS.length]
   }));
@@ -77,9 +61,8 @@ function Analytics() {
         <p className="page-subtitle">Skill demand insights, score distributions, and embedding visualization</p>
       </div>
 
-      {/* Row 1: Charts */}
       <div className="grid-2 mb-6">
-        {/* Top Resume Skills */}
+
         <div className="card">
           <div className="card-header">
             <div className="card-title">💡 Top Skills in Candidate Pool</div>
@@ -97,7 +80,6 @@ function Analytics() {
           </ResponsiveContainer>
         </div>
 
-        {/* Skill Demand (JD) pie */}
         <div className="card">
           <div className="card-header">
             <div className="card-title">🎯 Most Demanded Skills (JDs)</div>
@@ -105,7 +87,7 @@ function Analytics() {
           {jdSkills.length > 0 ? (
             <ResponsiveContainer width="100%" height={240}>
               <PieChart>
-                <Pie data={pieData.filter(d => d.name)} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label={({ name, percent }) => `${name} ${(percent*100).toFixed(0)}%`} labelLine={false} fontSize={10}>
+                <Pie data={pieData.filter(d => d.name)} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false} fontSize={10}>
                   {pieData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
                 </Pie>
                 <Tooltip contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', borderRadius: 10 }} />
@@ -119,7 +101,6 @@ function Analytics() {
         </div>
       </div>
 
-      {/* Row 2: Score distribution */}
       <div className="card mb-6">
         <div className="card-header">
           <div className="card-title">📊 Score Distribution</div>
@@ -156,28 +137,6 @@ function Analytics() {
         )}
       </div>
 
-      {/* Row 3: Embedding Visualizer */}
-      <div className="mb-6">
-        <EmbeddingVisualizer points={embedPoints} />
-      </div>
-
-      {/* Row 4: N×M Heatmap */}
-      <div className="mb-6">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <h3 style={{ fontWeight: 700 }}>🧩 Batch Matching Matrix</h3>
-          <button
-            id="load-matrix-btn"
-            className="btn btn-secondary btn-sm"
-            onClick={loadMatrix}
-            disabled={matrixLoading}
-          >
-            {matrixLoading ? '⟳ Computing...' : '⟳ Compute Full Matrix'}
-          </button>
-        </div>
-        <HeatmapMatrix matrix={matrix.matrix} jdTitles={matrix.jd_titles} />
-      </div>
-
-      {/* Row 5: Avg scores per JD */}
       {scoreStats.length > 0 && (
         <div className="card">
           <div className="card-header">
@@ -187,7 +146,7 @@ function Analytics() {
             <table>
               <thead>
                 <tr>
-                  <th>JD ID</th>
+                  <th>Role</th>
                   <th>Candidates Scored</th>
                   <th>Avg Score</th>
                   <th>Top Score</th>
@@ -196,7 +155,11 @@ function Analytics() {
               <tbody>
                 {scoreStats.map(s => (
                   <tr key={s.jd_id}>
-                    <td className="font-mono text-xs text-muted">{s.jd_id.slice(0, 12)}…</td>
+                    <td>
+                      {jds.find(j => j.id === s.jd_id)?.title || (
+                        <span className="font-mono text-xs text-muted">{s.jd_id.slice(0, 12)}…</span>
+                      )}
+                    </td>
                     <td>{s.candidate_count}</td>
                     <td style={{ color: s.avg_score >= 6 ? 'var(--brand-success)' : 'var(--brand-warning)', fontWeight: 700 }}>
                       {s.avg_score}
