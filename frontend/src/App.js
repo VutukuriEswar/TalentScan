@@ -4,14 +4,12 @@ import { Toaster } from 'react-hot-toast';
 import Dashboard from './pages/Dashboard';
 import DataStudio from './pages/DataStudio';
 import Analytics from './pages/Analytics';
-import Chat from './pages/Chat';
 import CandidateDetail from './pages/CandidateDetail';
 
 const NAV_ITEMS = [
-  { to: '/',         icon: '📊', label: 'Dashboard'   },
+  { to: '/',            icon: '📊', label: 'Dashboard'   },
   { to: '/data-studio', icon: '🗂️', label: 'Data Studio' },
-  { to: '/analytics',icon: '📈', label: 'Analytics'    },
-  { to: '/chat',     icon: '💬', label: 'AI Chat'      },
+  { to: '/analytics',   icon: '📈', label: 'Analytics'    },
 ];
 
 function Sidebar() {
@@ -36,7 +34,7 @@ function Sidebar() {
       </nav>
       <div style={{ padding: '16px 20px', borderTop: '1px solid var(--border-subtle)' }}>
         <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'center' }}>
-          TalentScan v1.0 · AI Resume Screener
+          TalentScan v2.0 · AI Resume Screener
         </div>
       </div>
     </aside>
@@ -63,7 +61,6 @@ function App() {
             <Route path="/"              element={<Dashboard />} />
             <Route path="/data-studio"   element={<DataStudio />} />
             <Route path="/analytics"     element={<Analytics />} />
-            <Route path="/chat"          element={<Chat />} />
             <Route path="/candidate/:id" element={<CandidateDetail />} />
             <Route path="*"              element={<NotFound />} />
           </Routes>

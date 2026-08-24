@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { listResumes, listJDs, getAnalysis, scoreBulk } from '../api';
+import { listResumes, listJDs, getAnalysis, analyzeResume } from '../api';
 import CandidateCard from '../components/CandidateCard';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 
 function StatCard({ label, value, icon, color = 'var(--brand-primary)' }) {
@@ -18,18 +18,28 @@ function StatCard({ label, value, icon, color = 'var(--brand-primary)' }) {
 function Dashboard() {
   const [resumes, setResumes] = useState([]);
   const [jds, setJDs] = useState([]);
-  const [candidates, setCandidates] = useState([]);
+  const [scores, setScores] = useState([]);
   const [selectedJD, setSelectedJD] = useState('');
   const [loading, setLoading] = useState(false);
-  const [bulkLoading, setBulkLoading] = useState(false);
+  const [analyzingId, setAnalyzingId] = useState(null);
+  const [bulkAnalyzing, setBulkAnalyzing] = useState(false);
+  const [selectedResume, setSelectedResume] = useState('');
+  const navigate = useNavigate();
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const jdFromUrl = params.get('jd');
-    loadData(jdFromUrl);
+  const loadScores = useCallback(async (jdId) => {
+    if (!jdId) return;
+    setLoading(true);
+    try {
+      const res = await getAnalysis(jdId, { limit: 100 });
+      setScores(res.data.shortlist || []);
+    } catch (e) {
+      setScores([]);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const loadData = async (preselect = null) => {
+  const loadData = useCallback(async (preselect = null) => {
     try {
       const [rRes, jRes] = await Promise.all([listResumes(), listJDs()]);
       setResumes(rRes.data.resumes || []);
@@ -38,57 +48,103 @@ function Dashboard() {
       const initial = preselect || (jdList.length ? jdList[0].id : '');
       if (initial) {
         setSelectedJD(initial);
-        loadCandidates(initial);
+        loadScores(initial);
       }
     } catch (e) {
       toast.error('Failed to load data');
     }
-  };
+  }, [loadScores]);
 
-  const loadCandidates = useCallback(async (jdId) => {
-    if (!jdId) return;
-    setLoading(true);
-    try {
-      const res = await getAnalysis(jdId, { limit: 100 });
-      setCandidates(res.data.shortlist || []);
-    } catch (e) {
-      setCandidates([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const jdFromUrl = params.get('jd');
+    loadData(jdFromUrl);
+  }, [loadData]);
 
   const handleJDChange = (jdId) => {
     setSelectedJD(jdId);
-    setCandidates([]);
-    if (jdId) loadCandidates(jdId);
+    setScores([]);
+    if (jdId) loadScores(jdId);
   };
 
-  const handleBulkScore = async () => {
-    if (!selectedJD) { toast.error('Select a Job Role first'); return; }
-    setBulkLoading(true);
+  const handleAnalyze = async (resumeId) => {
+    if (!selectedJD) return;
+    setAnalyzingId(resumeId);
     try {
-      const fd = new FormData();
-      fd.append('jd_id', selectedJD);
-      fd.append('resume_ids', '');
-      await scoreBulk(fd);
-      toast.success('Analysis started! Refreshing in a moment...');
-      setTimeout(() => loadCandidates(selectedJD), 3000);
+      await analyzeResume(resumeId, selectedJD);
+      toast.success('✅ Analysis complete!');
+      await loadScores(selectedJD);
     } catch (e) {
       toast.error('Analysis failed: ' + (e.response?.data?.detail || e.message));
     } finally {
-      setBulkLoading(false);
+      setAnalyzingId(null);
     }
   };
 
-  const selectedJDDoc = jds.find(j => j.id === selectedJD);
+  const handleAnalyzeSelected = async () => {
+    if (!selectedJD || !selectedResume) return;
+    setAnalyzingId(selectedResume);
+    try {
+      await analyzeResume(selectedResume, selectedJD);
+      toast.success('✅ Analysis complete!');
+      navigate(`/candidate/${selectedResume}`);
+    } catch (e) {
+      toast.error('Analysis failed: ' + (e.response?.data?.detail || e.message));
+      setAnalyzingId(null);
+    }
+  };
+
+  const handleAnalyzeAll = async () => {
+    if (!selectedJD) return;
+
+    const unanalyzed = resumes.filter(r => !scores.find(s => s.resume_id === r.id));
+    if (unanalyzed.length === 0) {
+      toast.success('All resumes are already analyzed!');
+      return;
+    }
+
+    setBulkAnalyzing(true);
+    let successCount = 0;
+
+    for (const r of unanalyzed) {
+      setAnalyzingId(r.id);
+      try {
+        await analyzeResume(r.id, selectedJD);
+        successCount++;
+      } catch (e) {
+        toast.error(`Analysis failed for ${r.filename || r.candidate_name}`);
+      }
+    }
+
+    setAnalyzingId(null);
+    setBulkAnalyzing(false);
+
+    if (successCount > 0) {
+      toast.success(`✅ Analyzed ${successCount} resume(s)!`);
+      loadScores(selectedJD);
+    }
+  };
+
+  const displayCandidates = resumes.map(r => {
+    const scoreDoc = scores.find(s => s.resume_id === r.id);
+    return scoreDoc ? { ...scoreDoc, id: scoreDoc.resume_id } : r;
+  });
+
+  displayCandidates.sort((a, b) => {
+    const scoreA = a.score != null ? a.score : -1;
+    const scoreB = b.score != null ? b.score : -1;
+    return scoreB - scoreA;
+  });
+
+  const analyzedCount = scores.length;
+  const notAnalyzed = resumes.length - analyzedCount;
 
   return (
     <div className="animate-fade-in">
       <div className="page-header">
         <div>
           <h1 className="page-title">📊 Dashboard</h1>
-          <p className="page-subtitle">See what your resumes are missing for each role</p>
+          <p className="page-subtitle">View and analyze candidates for your job roles</p>
         </div>
       </div>
 
@@ -96,6 +152,7 @@ function Dashboard() {
         <StatCard label="Resumes Uploaded" value={resumes.length} icon="📄" color="#6366f1" />
         <StatCard label="Job Roles" value={jds.length} icon="💼" color="#8b5cf6" />
       </div>
+
       <div className="card mb-6 animate-fade-up delay-200">
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <div className="form-group" style={{ flex: 1, minWidth: 200, marginBottom: 0 }}>
@@ -113,61 +170,85 @@ function Dashboard() {
             </select>
           </div>
 
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {selectedJD && resumes.length > 0 && (
+            <div className="form-group" style={{ flex: 1, minWidth: 200, marginBottom: 0 }}>
+              <label className="form-label">Select Resume</label>
+              <select
+                className="form-select"
+                value={selectedResume}
+                onChange={e => setSelectedResume(e.target.value)}
+              >
+                <option value="">Choose a resume...</option>
+                {resumes.map(r => (
+                  <option key={r.id} value={r.id}>{r.candidate_name || r.filename}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {selectedJD && selectedResume && (
             <button
-              id="analyze-all-btn"
               className="btn btn-primary"
-              onClick={handleBulkScore}
-              disabled={bulkLoading || !selectedJD}
+              onClick={handleAnalyzeSelected}
+              disabled={loading || bulkAnalyzing || analyzingId}
             >
-              {bulkLoading ? '⟳ Analyzing...' : '🔍 Analyze All Resumes'}
+              {analyzingId === selectedResume ? '⟳ Analyzing...' : '🤖 Analyze Selected'}
             </button>
-            <button
-              id="refresh-btn"
-              className="btn btn-secondary"
-              onClick={() => loadCandidates(selectedJD)}
-              disabled={!selectedJD || loading}
-            >
-              🔄 Refresh
-            </button>
-          </div>
+          )}
+
+          <button
+            id="refresh-btn"
+            className="btn btn-secondary"
+            onClick={() => loadScores(selectedJD)}
+            disabled={!selectedJD || loading || bulkAnalyzing || analyzingId}
+          >
+            🔄 Refresh
+          </button>
         </div>
-        {selectedJDDoc?.required_skills?.length > 0 && (
-          <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border-subtle)' }}>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-              Required skills for this role
+
+        {selectedJD && resumes.length > 0 && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border-subtle)', display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              {analyzedCount > 0
+                ? `${analyzedCount} of ${resumes.length} resume${resumes.length !== 1 ? 's' : ''} analyzed for this role`
+                : `${resumes.length} resume${resumes.length !== 1 ? 's' : ''} uploaded — none analyzed for this role yet`}
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {selectedJDDoc.required_skills.map(s => (
-                <span key={s} className="badge badge-primary" style={{ fontSize: '0.75rem' }}>{s}</span>
-              ))}
-            </div>
+
+            {notAnalyzed > 0 && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={handleAnalyzeAll}
+                disabled={bulkAnalyzing || !!analyzingId}
+              >
+                {bulkAnalyzing ? '⟳ Analyzing...' : `🤖 Analyze All Un-analyzed (${notAnalyzed})`}
+              </button>
+            )}
           </div>
         )}
       </div>
 
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-          <h2 style={{ fontWeight: 700, fontSize: '1.1rem' }}>
-            🔍 Gap Analysis
-          </h2>
-          {candidates.length > 0 && (
-            <span className="badge badge-neutral">{candidates.length} candidates analyzed</span>
+          <h2 style={{ fontWeight: 700, fontSize: '1.1rem' }}>🔍 Analysis Results</h2>
+          {resumes.length > 0 && selectedJD && (
+            <span className="badge badge-neutral">{resumes.length} total candidates</span>
           )}
         </div>
 
-        {loading ? (
+        {loading && !analyzingId && !bulkAnalyzing ? (
           <div className="loading-overlay">
             <div className="spinner" />
-            <span>Analyzing candidates...</span>
+            <span>Loading results...</span>
           </div>
-        ) : candidates.length > 0 ? (
+        ) : displayCandidates.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {candidates.map(c => (
+            {displayCandidates.map(c => (
               <CandidateCard
-                key={c.resume_id || c.id}
+                key={c.id}
                 candidate={c}
                 jdId={selectedJD}
+                onAnalyze={c.score == null ? handleAnalyze : undefined}
+                isAnalyzing={analyzingId === c.id}
               />
             ))}
           </div>
@@ -175,18 +256,25 @@ function Dashboard() {
           <div className="empty-state card">
             <div className="empty-state-icon">📭</div>
             <div className="empty-state-title">
-              {!selectedJD ? 'Select a Job Role' : 'No analysis yet'}
+              {!selectedJD ? 'Select a Job Role' : 'No Resumes Uploaded'}
             </div>
             <div className="empty-state-desc">
               {!selectedJD
-                ? 'Choose a job role above to see the gap analysis for your resumes.'
-                : 'Click "Analyze All Resumes" to see what each resume is missing for this role.'}
+                ? 'Choose a job role above to see and analyze candidates.'
+                : 'You have not uploaded any resumes yet.'}
             </div>
-            {!selectedJD && jds.length === 0 && (
-              <Link to="/data-studio" className="btn btn-primary" style={{ marginTop: 16 }}>
-                🗂️ Upload Job Descriptions
-              </Link>
-            )}
+            <div style={{ display: 'flex', gap: 10, marginTop: 16, flexWrap: 'wrap', justifyContent: 'center' }}>
+              {!selectedJD && jds.length === 0 && (
+                <Link to="/data-studio" className="btn btn-primary">
+                  🗂️ Upload Job Descriptions
+                </Link>
+              )}
+              {resumes.length === 0 && (
+                <Link to="/data-studio" className="btn btn-secondary">
+                  📄 Upload Resumes
+                </Link>
+              )}
+            </div>
           </div>
         )}
       </div>

@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { uploadResumes, uploadJD, listJDs, deleteJD, listResumes, deleteResume } from '../api';
+import { uploadResumes, uploadJD, listJDs, listResumes, deleteResume } from '../api';
 import ResumeUploader from '../components/ResumeUploader';
 import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 
 function DataStudio() {
   const [resumeFiles, setResumeFiles] = useState([]);
-  const [biasRedact, setBiasRedact] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [results, setResults] = useState(null);
   const [progress, setProgress] = useState(0);
@@ -33,9 +32,7 @@ function DataStudio() {
   };
 
   useEffect(() => {
-    if (activeTab === 'library') {
-      loadResumes();
-    }
+    if (activeTab === 'library') loadResumes();
   }, [activeTab]);
 
   const handleDeleteResume = async (id) => {
@@ -61,9 +58,7 @@ function DataStudio() {
     }
   };
 
-  useEffect(() => {
-    loadJDs();
-  }, []);
+  useEffect(() => { loadJDs(); }, []);
 
   const handleUploadResumes = async () => {
     if (!resumeFiles.length) { toast.error('Add at least one resume file'); return; }
@@ -71,13 +66,14 @@ function DataStudio() {
     setProgress(0);
     const fd = new FormData();
     resumeFiles.forEach(f => fd.append('files', f));
-    fd.append('bias_redact', biasRedact);
     try {
       const res = await uploadResumes(fd, (e) => {
         if (e.total) setProgress(Math.round((e.loaded / e.total) * 100));
       });
       setResults(res.data);
-      toast.success(`✅ ${res.data.uploaded} resume(s) processed!`);
+      const uploaded = res.data.results?.filter(r => r.success).length || 0;
+      const skipped = res.data.results?.filter(r => r.skipped).length || 0;
+      toast.success(`✅ ${uploaded} resume(s) saved!${skipped ? ` (${skipped} duplicate${skipped !== 1 ? 's' : ''} skipped)` : ''}`);
       setResumeFiles([]);
       setProgress(0);
     } catch (e) {
@@ -89,22 +85,22 @@ function DataStudio() {
 
   const handleUploadJD = async () => {
     if (!jdTitle.trim()) { toast.error('Please enter a Job Title'); return; }
+    if (!jdText.trim() && !jdFile) { toast.error('Enter JD text or upload a file'); return; }
+
     const fd = new FormData();
     fd.append('title', jdTitle.trim());
     if (jdText.trim()) fd.append('text', jdText);
-    else if (jdFile) fd.append('file', jdFile);
-    else { toast.error('Enter JD text or upload a file'); return; }
+    else fd.append('file', jdFile);
 
     setUploadingJD(true);
     try {
       await uploadJD(fd);
-      toast.success('✅ Job Description saved & analyzed!');
+      toast.success('✅ Job Description saved!');
       setJDTitle('');
       setJDText('');
       setJDFile(null);
       const fileInput = document.getElementById('jd-file-input');
       if (fileInput) fileInput.value = '';
-
       loadJDs();
     } catch (e) {
       toast.error('JD upload failed: ' + (e.response?.data?.detail || e.message));
@@ -113,22 +109,13 @@ function DataStudio() {
     }
   };
 
-  const handleDeleteJD = async (id) => {
-    if (!window.confirm('Delete this Job Description?')) return;
-    try {
-      await deleteJD(id);
-      toast.success('JD deleted');
-      setJDs(prev => prev.filter(j => j.id !== id));
-    } catch (e) {
-      toast.error('Delete failed');
-    }
-  };
+
 
   return (
     <div className="animate-fade-in">
       <div className="page-header">
         <h1 className="page-title">🗂️ Data Studio</h1>
-        <p className="page-subtitle">Upload resumes and manage Job Descriptions for AI screening</p>
+        <p className="page-subtitle">Upload resumes and job descriptions — AI analysis runs when you click Analyze</p>
       </div>
 
       <div className="grid-2" style={{ alignItems: 'start' }}>
@@ -150,29 +137,6 @@ function DataStudio() {
 
               <div className="divider" />
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.875rem' }}>
-                  <input
-                    id="bias-redact-toggle"
-                    type="checkbox"
-                    checked={biasRedact}
-                    onChange={e => setBiasRedact(e.target.checked)}
-                    style={{ width: 16, height: 16, accentColor: 'var(--brand-primary)' }}
-                  />
-                  <span>🎭 Bias-reduction mode</span>
-                  <span className="badge badge-warning">blind screening</span>
-                </label>
-              </div>
-              {biasRedact && (
-                <div style={{
-                  background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)',
-                  borderRadius: 'var(--radius-md)', padding: '10px 14px',
-                  fontSize: '0.8rem', color: 'var(--brand-warning)', marginBottom: 16,
-                }}>
-                  ⚠️ Names, email addresses, gender markers, and age indicators will be redacted before scoring.
-                </div>
-              )}
-
               {uploading && (
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Uploading... {progress}%</div>
@@ -188,8 +152,12 @@ function DataStudio() {
                 onClick={handleUploadResumes}
                 disabled={uploading || !resumeFiles.length}
               >
-                {uploading ? '⟳ Processing...' : `🚀 Upload ${resumeFiles.length || ''} Resume${resumeFiles.length !== 1 ? 's' : ''}`}
+                {uploading ? '⟳ Saving...' : `🚀 Save ${resumeFiles.length || ''} Resume${resumeFiles.length !== 1 ? 's' : ''}`}
               </button>
+
+              <div style={{ marginTop: 10, fontSize: '0.75rem', color: 'var(--text-muted)', textAlign: 'center' }}>
+                Resumes are saved as-is. AI analysis runs later from the candidate page.
+              </div>
             </div>
           ) : (
             <div className="card">
@@ -209,9 +177,14 @@ function DataStudio() {
                   {resumes.map(r => (
                     <div key={r.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius-sm)' }}>
                       <div>
-                        <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{r.name || r.filename}</div>
+                        <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{r.candidate_name || r.filename}</div>
                         <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                          {r.skills?.length || 0} skills · {r.experience_years || 0}y exp
+                          {r.filename}
+                          {r.latest_score != null && (
+                            <span style={{ marginLeft: 8, color: r.latest_score >= 7 ? 'var(--brand-success)' : r.latest_score >= 5 ? 'var(--brand-warning)' : 'var(--brand-danger)', fontWeight: 600 }}>
+                              · Score: {r.latest_score}/10
+                            </span>
+                          )}
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: 8 }}>
@@ -229,7 +202,7 @@ function DataStudio() {
             <div className="card mt-4 animate-fade-up delay-200">
               <div className="card-header">
                 <div className="card-title">✅ Upload Results</div>
-                <span className="badge badge-success">{results.uploaded} processed</span>
+                <span className="badge badge-success">{results.uploaded} saved</span>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {results.results.map((r, i) => (
@@ -242,14 +215,8 @@ function DataStudio() {
                     <span>{r.error ? '❌' : r.skipped ? '⚠️' : '✅'}</span>
                     <div style={{ flex: 1 }}>
                       <div className="truncate" style={{ fontWeight: 500 }}>{r.filename}</div>
-                      {r.name && <div style={{ color: 'var(--text-muted)' }}>{r.name} · {r.skills_found} skills · {r.experience_years}y exp</div>}
                       {r.error && <div style={{ color: 'var(--brand-danger)' }}>{r.error}</div>}
-                      {r.skipped && <div style={{ color: 'var(--brand-warning)' }}>Duplicate detected</div>}
-                      {r.authenticity_risk && r.authenticity_risk !== 'LOW' && (
-                        <span className={`badge badge-${r.authenticity_risk === 'HIGH' ? 'danger' : 'warning'}`} style={{ marginTop: 4 }}>
-                          🔍 {r.authenticity_risk} risk
-                        </span>
-                      )}
+                      {r.skipped && <div style={{ color: 'var(--brand-warning)' }}>Duplicate — already in library</div>}
                     </div>
                     {r.resume_id && (
                       <Link to={`/candidate/${r.resume_id}`} className="btn btn-ghost btn-icon btn-sm">→</Link>
@@ -260,12 +227,13 @@ function DataStudio() {
             </div>
           )}
         </div>
+
         <div className="animate-fade-up delay-200" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
           <div className="card">
             <div className="card-header">
               <div className="card-title">💼 Add Job Description</div>
-              <span className="badge badge-primary">AI Quality Check</span>
+              <span className="badge badge-neutral">Saved as-is</span>
             </div>
 
             <div className="form-group">
@@ -287,7 +255,7 @@ function DataStudio() {
                 rows={8}
                 value={jdText}
                 onChange={e => setJDText(e.target.value)}
-                placeholder="Paste the full job description here...&#10;&#10;Include: job title, responsibilities, required skills, experience level, and qualifications."
+                placeholder={"Paste the full job description here...\n\nInclude: responsibilities, required skills, experience level, and qualifications."}
               />
             </div>
 
@@ -324,8 +292,12 @@ function DataStudio() {
               onClick={handleUploadJD}
               disabled={uploadingJD || (!jdText.trim() && !jdFile) || !jdTitle.trim()}
             >
-              {uploadingJD ? '⟳ Analyzing...' : '💼 Save & Analyze JD'}
+              {uploadingJD ? '⟳ Saving...' : '💼 Save Job Description'}
             </button>
+
+            <div style={{ marginTop: 10, fontSize: '0.75rem', color: 'var(--text-muted)', textAlign: 'center' }}>
+              JD is saved exactly as entered. No AI is used until you analyze a resume.
+            </div>
           </div>
 
           <div>
@@ -340,58 +312,22 @@ function DataStudio() {
                 <div className="empty-state-desc" style={{ fontSize: '0.85rem' }}>Upload your first JD above.</div>
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                {jds.map((jd, idx) => {
-                  const qa = jd.quality_analysis || {};
-                  const issues = qa.issues || [];
-                  const qs = qa.quality_score || 0;
-
-                  return (
-                    <div key={jd.id} className={`card animate-fade-up delay-${Math.min((idx + 3) * 100, 500)}`} style={{ padding: 20 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-                        <div>
-                          <div style={{ fontWeight: 700, fontSize: '1rem' }}>{jd.title || 'Untitled Role'}</div>
-                          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                            ID: <code>{jd.id}</code>
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', gap: 8 }}>
-                          <Link to={`/?jd=${jd.id}`} className="btn btn-primary btn-sm">📊 Analyze</Link>
-                          <button className="btn btn-danger btn-sm" onClick={() => handleDeleteJD(jd.id)}>🗑️</button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {jds.map((jd, idx) => (
+                  <div key={jd.id} className={`card animate-fade-up delay-${Math.min((idx + 3) * 100, 500)}`} style={{ padding: 20 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 4 }}>{jd.title || 'Untitled Role'}</div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          Saved {new Date(jd.created_at).toLocaleDateString()} · ID: <code>{jd.id?.slice(0, 12)}…</code>
                         </div>
                       </div>
-
-                      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--bg-elevated)', padding: '6px 12px', borderRadius: 'var(--radius-sm)' }}>
-                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Quality:</span>
-                          <span style={{
-                            fontWeight: 800,
-                            color: qs >= 7 ? 'var(--brand-success)' : qs >= 5 ? 'var(--brand-warning)' : 'var(--brand-danger)'
-                          }}>
-                            {qs}/10
-                          </span>
-                        </div>
-
-                        {issues.length > 0 && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(245,158,11,0.06)', padding: '6px 12px', borderRadius: 'var(--radius-sm)' }}>
-                            <span style={{ fontSize: '0.75rem', color: 'var(--brand-warning)' }}>⚠️ {issues.length} Issues</span>
-                          </div>
-                        )}
+                      <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginLeft: 12 }}>
+                        <Link to={`/?jd=${jd.id}`} className="btn btn-primary btn-sm">📊 View</Link>
                       </div>
-
-                      {qa.improved_summary && qa.improved_summary !== 'Analysis requires LLM. Basic heuristic applied.' && (
-                        <div style={{
-                          marginTop: 12, background: 'rgba(16,185,129,0.06)',
-                          border: '1px solid rgba(16,185,129,0.2)', borderRadius: 'var(--radius-sm)',
-                          padding: '10px', fontSize: '0.8rem', color: 'var(--text-secondary)'
-                        }}>
-                          <span style={{ fontWeight: 600, color: 'var(--brand-success)' }}>✨ AI Suggestion: </span>
-                          {qa.improved_summary}
-                        </div>
-                      )}
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
             )}
           </div>

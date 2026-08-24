@@ -1,26 +1,15 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 
-function CandidateCard({ candidate, jdId }) {
-  const name = candidate.name || candidate.candidate_name || 'Unknown Candidate';
-  const initial = name[0]?.toUpperCase();
+function CandidateCard({ candidate, jdId, onAnalyze, isAnalyzing }) {
+  const name = candidate.candidate_name || candidate.name || 'Unknown Candidate';
+  const initial = name[0]?.toUpperCase() || '?';
 
   const matched = candidate.matched_skills || [];
   const missing = candidate.missing_required_skills || [];
-  const allSkills = candidate.skills || [];
 
-  const coveragePercent = (matched.length + missing.length) > 0
-    ? Math.round((matched.length / (matched.length + missing.length)) * 100)
-    : null;
 
-  const coverageColor = coveragePercent == null
-    ? 'var(--text-muted)'
-    : coveragePercent >= 70 ? '#10b981'
-      : coveragePercent >= 40 ? '#f59e0b'
-        : '#ef4444';
 
-  const riskColors = { LOW: 'success', MEDIUM: 'warning', HIGH: 'danger' };
-  const risk = candidate.authenticity?.risk_level || 'LOW';
   const analyzed = matched.length > 0 || missing.length > 0;
 
   return (
@@ -47,27 +36,16 @@ function CandidateCard({ candidate, jdId }) {
               {candidate.experience_years > 0 && (
                 <span className="badge badge-info">{candidate.experience_years}y exp</span>
               )}
-              <span className={`badge badge-${riskColors[risk]}`}>
-                {risk === 'LOW' ? '✓ Verified' : risk === 'MEDIUM' ? '⚠ Review' : '🚨 Flags'}
-              </span>
+              {candidate.score != null && (
+                <span className={`badge badge-${candidate.score >= 7 ? 'success' : candidate.score >= 5 ? 'warning' : 'danger'}`}>
+                  Score: {candidate.score}/10
+                </span>
+              )}
             </div>
           </div>
         </div>
 
-        {coveragePercent != null && (
-          <div style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center',
-            background: 'var(--bg-elevated)', borderRadius: 'var(--radius-sm)',
-            padding: '8px 14px', flexShrink: 0,
-          }}>
-            <span style={{ fontSize: '1.4rem', fontWeight: 800, color: coverageColor, lineHeight: 1 }}>
-              {coveragePercent}%
-            </span>
-            <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: 2, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-              match
-            </span>
-          </div>
-        )}
+
       </div>
 
       {!analyzed && (
@@ -76,7 +54,7 @@ function CandidateCard({ candidate, jdId }) {
           borderRadius: 'var(--radius-sm)', padding: '8px 12px',
           fontSize: '0.8rem', color: 'var(--brand-warning)',
         }}>
-          ⚡ Not yet analyzed — click "Analyze All Resumes" above
+          ⚡ Not yet analyzed for this role.
         </div>
       )}
 
@@ -112,33 +90,22 @@ function CandidateCard({ candidate, jdId }) {
         </div>
       )}
 
-      {!analyzed && allSkills.length > 0 && (
+      {candidate.justification && (
         <div>
           <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-            Detected Skills
+            Experience & Fit Summary
           </div>
-          <div className="skill-tags">
-            {allSkills.slice(0, 8).map(s => (
-              <span key={s} className="skill-tag skill-tag-neutral">{s}</span>
-            ))}
-            {allSkills.length > 8 && (
-              <span className="skill-tag skill-tag-neutral">+{allSkills.length - 8}</span>
-            )}
+          <div style={{
+            background: 'rgba(99,102,241,0.06)', borderRadius: 'var(--radius-sm)',
+            padding: '10px 12px', fontSize: '0.8rem', color: 'var(--text-secondary)',
+            borderLeft: '3px solid var(--brand-primary)', fontStyle: 'italic',
+          }}>
+            {candidate.justification}
           </div>
         </div>
       )}
 
-      {candidate.justification && (
-        <div style={{
-          background: 'rgba(99,102,241,0.06)', borderRadius: 'var(--radius-sm)',
-          padding: '10px 12px', fontSize: '0.8rem', color: 'var(--text-secondary)',
-          borderLeft: '3px solid var(--brand-primary)', fontStyle: 'italic',
-        }}>
-          {candidate.justification}
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 'auto' }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 'auto', alignItems: 'center', justifyContent: 'space-between' }}>
         <Link
           to={`/candidate/${candidate.resume_id || candidate.id}`}
           className="btn btn-secondary btn-sm"
@@ -146,6 +113,16 @@ function CandidateCard({ candidate, jdId }) {
         >
           👤 View Profile
         </Link>
+
+        {onAnalyze && (
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => onAnalyze(candidate.resume_id || candidate.id)}
+            disabled={isAnalyzing}
+          >
+            {isAnalyzing ? '⟳ Analyzing...' : (analyzed ? '🔄 Re-analyze' : '🤖 Analyze')}
+          </button>
+        )}
       </div>
     </div>
   );
