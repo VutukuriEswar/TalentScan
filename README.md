@@ -141,12 +141,6 @@ yarn start
 **Fallback Strategy:**
 - The app works fully without `OPENROUTER_API_KEY`. All LLM-dependent features gracefully fall back to TF-IDF/cosine similarity scoring and basic keyword matching.
 
-## 🎥 Demo
-
-Check out the live demonstration of TalentScan in action. See how the platform seamlessly screens bulk resumes, analyzes skill gaps, and lets you interactively chat with your candidate pool.
-
-[Watch the Demo Here](#)
-
 ## License
 
 This project is licensed under the **MIT License** — see the [LICENSE](./LICENSE) file for details.
